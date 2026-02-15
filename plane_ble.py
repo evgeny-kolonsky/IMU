@@ -40,8 +40,8 @@ UART_SERVICE_UUID = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
 UART_RX_CHAR_UUID = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
 UART_TX_CHAR_UUID = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
 
-ACCEL_SCALE = 0.000061  # ±2g default: 0.061 mg/LSB
-GYRO_SCALE  = 0.00875   # 245 dps default: 8.75 mdps/LSB
+ACCEL_SCALE = 0.000488  # ±16g (LSM6DS3 library default): 0.488 mg/LSB
+GYRO_SCALE  = 0.070     # ±2000 dps (LSM6DS3 library default): 70 mdps/LSB
 
 
 # ═══════════════════════════════════════════════════
@@ -836,6 +836,19 @@ class BallStudio(QMainWindow):
         self.ble_cursor.setVisible(False)
         self.ble_plot.addItem(self.ble_cursor)
 
+        self.ble_plot_g = pg.PlotWidget(); self.ble_plot_g.setTitle("Gyroscope (°/s)",color='#8b949e',size='11pt')
+        self.ble_plot_g.setLabel('left','°/s'); self.ble_plot_g.setLabel('bottom','Time (s)')
+        self.ble_plot_g.showGrid(x=True,y=True,alpha=0.15); self.ble_plot_g.addLegend(offset=(10,10))
+        self.ble_c_gx = self.ble_plot_g.plot(pen=pg.mkPen('#f85149',width=2),name="X")
+        self.ble_c_gy = self.ble_plot_g.plot(pen=pg.mkPen('#3fb950',width=2),name="Y")
+        self.ble_c_gz = self.ble_plot_g.plot(pen=pg.mkPen('#58a6ff',width=2),name="Z")
+        self.ble_cursor_g = pg.InfiniteLine(pos=0, angle=90, pen=pg.mkPen('#f0883e', width=2, style=Qt.DashLine))
+        self.ble_cursor_g.setVisible(False)
+        self.ble_plot_g.addItem(self.ble_cursor_g)
+
+        # Link X axes so zoom/pan syncs between accel and gyro
+        self.ble_plot_g.setXLink(self.ble_plot)
+
         self.ble_airplane = AirplaneWidget()
         bac = QFrame(); bac.setObjectName("card"); bal = QVBoxLayout(bac); bal.setContentsMargins(8,8,8,8)
         bal.addWidget(QLabel("3D Orientation",alignment=Qt.AlignCenter,styleSheet="color:#8b949e;font-size:11pt;"))
@@ -844,7 +857,8 @@ class BallStudio(QMainWindow):
                                   styleSheet="color:#58a6ff;font-size:10pt;font-weight:bold;")
         bal.addWidget(self.ble_orient)
 
-        sp = QSplitter(Qt.Horizontal); sp.addWidget(self.ble_plot); sp.addWidget(bac); sp.setSizes([600,400])
+        plots_v = QSplitter(Qt.Vertical); plots_v.addWidget(self.ble_plot); plots_v.addWidget(self.ble_plot_g); plots_v.setSizes([250,250])
+        sp = QSplitter(Qt.Horizontal); sp.addWidget(plots_v); sp.addWidget(bac); sp.setSizes([600,400])
         lo.addWidget(sp)
         return w
 
@@ -1156,67 +1170,27 @@ class BallStudio(QMainWindow):
         if not data:
             self.ble_info.setText("No data received"); self.ble_ind.set_status('warning'); return
 
-        # Process data with auto-calibration from first 50 rest samples
+        # Process data: raw int16 → physical units (no auto-calibration)
         dt = 1.0/100
-        CALIB_SAMPLES = 50  # First 0.5s assumed at rest
-
-        # Auto-calibrate gyro bias and accel scale from rest samples
-        if len(data) >= CALIB_SAMPLES:
-            calib = data[:CALIB_SAMPLES]
-            gyro_bias = [
-                sum(r[3] for r in calib) / CALIB_SAMPLES,
-                sum(r[4] for r in calib) / CALIB_SAMPLES,
-                sum(r[5] for r in calib) / CALIB_SAMPLES,
-            ]
-            # Accel magnitude at rest should be 1g
-            avg_ax = sum(r[0] for r in calib) / CALIB_SAMPLES
-            avg_ay = sum(r[1] for r in calib) / CALIB_SAMPLES
-            avg_az = sum(r[2] for r in calib) / CALIB_SAMPLES
-            g_magnitude = np.sqrt(avg_ax**2 + avg_ay**2 + avg_az**2)
-            # Scale so that raw magnitude maps to 1.0g
-            a_scale = 1.0 / g_magnitude if g_magnitude > 100 else ACCEL_SCALE
-            print(f"[CALIB] Gyro bias: {gyro_bias[0]:.1f}, {gyro_bias[1]:.1f}, {gyro_bias[2]:.1f}")
-            print(f"[CALIB] Accel |g|={g_magnitude:.0f} raw, scale={a_scale:.8f}")
-        else:
-            gyro_bias = [0, 0, 0]
-            a_scale = ACCEL_SCALE
 
         t_arr, ax_arr, ay_arr, az_arr = [],[],[],[]
         gx_arr, gy_arr, gz_arr = [],[],[]
-        roll_arr, pitch_arr, yaw_arr = [],[],[]
-        fr = fp = fy = 0.0; prev_r = 0.0
 
         for i, row in enumerate(data):
             if len(row)<6: continue
             t = i*dt; t_arr.append(t)
-            fax=row[0]*a_scale; fay=row[1]*a_scale; faz=row[2]*a_scale
-            fgx=(row[3]-gyro_bias[0])*GYRO_SCALE
-            fgy=(row[4]-gyro_bias[1])*GYRO_SCALE
-            fgz=(row[5]-gyro_bias[2])*GYRO_SCALE
+            fax=row[0]*ACCEL_SCALE; fay=row[1]*ACCEL_SCALE; faz=row[2]*ACCEL_SCALE
+            fgx=row[3]*GYRO_SCALE;  fgy=row[4]*GYRO_SCALE;  fgz=row[5]*GYRO_SCALE
             ax_arr.append(fax); ay_arr.append(fay); az_arr.append(faz)
             gx_arr.append(fgx); gy_arr.append(fgy); gz_arr.append(fgz)
 
-            ra = np.arctan2(fay,faz)*57.2958
-            pa = np.arctan2(-fax,np.sqrt(fay*fay+faz*faz))*57.2958
-            if i==0: fr=ra; fp=pa; fy=0.0
-            else:
-                if abs(ra-prev_r)>180: fr=ra
-                else:
-                    fr = 0.96*(fr+fgx*dt)+0.04*ra
-                    while fr>180: fr-=360
-                    while fr<-180: fr+=360
-                fp = 0.96*(fp+fgy*dt)+0.04*pa; fy += fgz*dt
-            prev_r = ra
-            roll_arr.append(fr); pitch_arr.append(fp); yaw_arr.append(fy)
-
         if ax_arr:
-            self.ble_raw_data = list(zip(t_arr,ax_arr,ay_arr,az_arr,gx_arr,gy_arr,gz_arr,roll_arr,pitch_arr,yaw_arr))
+            self.ble_raw_data = list(zip(t_arr,ax_arr,ay_arr,az_arr,gx_arr,gy_arr,gz_arr))
             self.ble_c_ax.setData(t_arr,ax_arr); self.ble_c_ay.setData(t_arr,ay_arr); self.ble_c_az.setData(t_arr,az_arr)
-            self.ble_info.setText(f"✓ Downloaded: {len(ax_arr)} pts, {t_arr[-1]:.1f}s (auto-calibrated from first {CALIB_SAMPLES} samples)")
+            self.ble_c_gx.setData(t_arr,gx_arr); self.ble_c_gy.setData(t_arr,gy_arr); self.ble_c_gz.setData(t_arr,gz_arr)
+            self.ble_info.setText(f"✓ Downloaded: {len(ax_arr)} pts, {t_arr[-1]:.1f}s (raw, no calibration)")
             self.ble_ind.set_status('ok'); self.ble_prog.setValue(self.ble_prog.maximum())
             self.btn_ble_save.setEnabled(True)
-            self.ble_airplane.set_orientation(roll_arr[-1],-pitch_arr[-1],yaw_arr[-1])
-            self.ble_orient.setText(f"Roll:{roll_arr[-1]:.1f}° Pitch:{pitch_arr[-1]:.1f}° Yaw:{yaw_arr[-1]:.1f}°")
 
             # Enable playback
             self.ble_pb_frame.setVisible(True)
@@ -1229,6 +1203,8 @@ class BallStudio(QMainWindow):
             self.ble_pb_index = 0
             self.ble_cursor.setVisible(True)
             self.ble_cursor.setValue(0)
+            self.ble_cursor_g.setVisible(True)
+            self.ble_cursor_g.setValue(0)
 
     def _ble_on_msg(self, msg):
         self.ble_info.setText(msg); print(f"[BLE MSG] {msg}")
@@ -1253,6 +1229,7 @@ class BallStudio(QMainWindow):
         if self.ble_worker and self.ble_connected:
             self.btn_dl.setEnabled(False); self.ble_prog.setValue(0)
             self.ble_raw_data = []; self.ble_c_ax.setData([]); self.ble_c_ay.setData([]); self.ble_c_az.setData([])
+            self.ble_c_gx.setData([]); self.ble_c_gy.setData([]); self.ble_c_gz.setData([])
             self.ble_info.setText("Starting download...")
             self.status_poll_timer.stop()  # CRITICAL: don't poll during download
             self.ble_worker.send_command("DOWNLOAD")
@@ -1268,9 +1245,9 @@ class BallStudio(QMainWindow):
         fn, _ = QFileDialog.getSaveFileName(self,"Save Ball Data",f"ball_{datetime.now():%Y%m%d_%H%M%S}.csv","CSV (*.csv)")
         if fn:
             with open(fn,'w') as f:
-                f.write("time_s,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps,roll_deg,pitch_deg,yaw_deg\n")
+                f.write("time_s,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps\n")
                 for r in self.ble_raw_data:
-                    f.write(f"{r[0]:.3f},{r[1]:.6f},{r[2]:.6f},{r[3]:.6f},{r[4]:.2f},{r[5]:.2f},{r[6]:.2f},{r[7]:.2f},{r[8]:.2f},{r[9]:.2f}\n")
+                    f.write(f"{r[0]:.3f},{r[1]:.6f},{r[2]:.6f},{r[3]:.6f},{r[4]:.2f},{r[5]:.2f},{r[6]:.2f}\n")
             self.ble_info.setText(f"Saved: {fn}")
 
     # ── BLE tab playback ──
@@ -1298,8 +1275,7 @@ class BallStudio(QMainWindow):
         if self.ble_raw_data:
             r = self.ble_raw_data[0]
             self.ble_cursor.setValue(r[0])
-            self.ble_airplane.set_orientation(r[7], -r[8], r[9])
-            self.ble_orient.setText(f"Roll:{r[7]:.1f}° Pitch:{r[8]:.1f}° Yaw:{r[9]:.1f}°")
+            self.ble_cursor_g.setValue(r[0])
             self.ble_pb_time.setText(f"0.00s / {self.ble_raw_data[-1][0]:.2f}s")
 
     def _ble_pb_slider_moved(self, val):
@@ -1326,9 +1302,8 @@ class BallStudio(QMainWindow):
         self.ble_pb_slider.blockSignals(False)
 
         self.ble_cursor.setValue(t)
+        self.ble_cursor_g.setValue(t)
         self.ble_pb_time.setText(f"{t:.2f}s / {total:.2f}s")
-        self.ble_airplane.set_orientation(r[7], -r[8], r[9])
-        self.ble_orient.setText(f"Roll:{r[7]:.1f}° Pitch:{r[8]:.1f}° Yaw:{r[9]:.1f}°")
 
     # ═══════════════════════════════════════════════
     #  PLAYBACK HANDLERS
