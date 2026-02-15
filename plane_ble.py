@@ -95,7 +95,7 @@ class BLEScanWorker(QThread):
 class BLEControlWorker(QThread):
     connected_changed = pyqtSignal(bool)
     status_received   = pyqtSignal(dict)
-    recording_status  = pyqtSignal(str, int)      # "START"/"DONE", value
+    recording_status  = pyqtSignal(str, int, int)   # "START"/"DONE", value, sample_rate_hz
     download_progress = pyqtSignal(int, int)
     download_finished = pyqtSignal(list)
     message_received  = pyqtSignal(str)
@@ -230,11 +230,12 @@ class BLEControlWorker(QThread):
             elif line.startswith("REC:START"):
                 parts = line.split(",")
                 dur = int(parts[1]) if len(parts) > 1 else 0
-                self.recording_status.emit("START", dur)
+                hz  = int(parts[2]) if len(parts) > 2 else 100
+                self.recording_status.emit("START", dur, hz)
             elif line.startswith("REC:DONE"):
                 parts = line.split(",")
                 cnt = int(parts[1]) if len(parts) > 1 else 0
-                self.recording_status.emit("DONE", cnt)
+                self.recording_status.emit("DONE", cnt, 0)
             elif line.startswith("ERR:"):
                 self.error_signal.emit(line)
             elif line == "SLEEPING":
@@ -614,6 +615,7 @@ class BallStudio(QMainWindow):
         self.ble_connected = False
         self.ball_status = {}
         self.ble_raw_data = []
+        self.ble_sample_rate = 100  # default, updated from REC:START
 
         # Playback
         self.playback_data = None
@@ -1144,9 +1146,11 @@ class BallStudio(QMainWindow):
 
         self.ble_info.setText(f"Status: {state}, Battery: {bp}% ({bv:.2f}V), Samples: {samples}")
 
-    def _ble_on_rec(self, status, val):
+    def _ble_on_rec(self, status, val, hz):
         if status == "START":
-            self.ble_info.setText(f"⏺ Recording {val}s...")
+            if hz > 0:
+                self.ble_sample_rate = hz
+            self.ble_info.setText(f"⏺ Recording {val}s @ {self.ble_sample_rate}Hz...")
             self.ble_ind.set_status('active')
             self.btn_record.setEnabled(False)
             self.btn_dl.setEnabled(False)
@@ -1171,7 +1175,7 @@ class BallStudio(QMainWindow):
             self.ble_info.setText("No data received"); self.ble_ind.set_status('warning'); return
 
         # Process data: raw int16 → physical units (no auto-calibration)
-        dt = 1.0/100
+        dt = 1.0 / self.ble_sample_rate
 
         t_arr, ax_arr, ay_arr, az_arr = [],[],[],[]
         gx_arr, gy_arr, gz_arr = [],[],[]
@@ -1188,7 +1192,7 @@ class BallStudio(QMainWindow):
             self.ble_raw_data = list(zip(t_arr,ax_arr,ay_arr,az_arr,gx_arr,gy_arr,gz_arr))
             self.ble_c_ax.setData(t_arr,ax_arr); self.ble_c_ay.setData(t_arr,ay_arr); self.ble_c_az.setData(t_arr,az_arr)
             self.ble_c_gx.setData(t_arr,gx_arr); self.ble_c_gy.setData(t_arr,gy_arr); self.ble_c_gz.setData(t_arr,gz_arr)
-            self.ble_info.setText(f"✓ Downloaded: {len(ax_arr)} pts, {t_arr[-1]:.1f}s (raw, no calibration)")
+            self.ble_info.setText(f"✓ Downloaded: {len(ax_arr)} pts, {t_arr[-1]:.1f}s @ {self.ble_sample_rate}Hz (raw)")
             self.ble_ind.set_status('ok'); self.ble_prog.setValue(self.ble_prog.maximum())
             self.btn_ble_save.setEnabled(True)
 
@@ -1255,9 +1259,9 @@ class BallStudio(QMainWindow):
     def _ble_play(self):
         if not self.ble_raw_data: return
         self.ble_pb_playing = True
-        dt = self.ble_raw_data[1][0] - self.ble_raw_data[0][0] if len(self.ble_raw_data) > 1 else 0.01
-        interval = max(5, int(dt * 1000))
-        self.ble_pb_timer.start(interval)
+        self._ble_pb_start_time = time.time()
+        self._ble_pb_start_index = self.ble_pb_index
+        self.ble_pb_timer.start(30)  # ~33 fps, enough for smooth cursor
         self.btn_ble_play.setEnabled(False)
         self.btn_ble_pause.setEnabled(True)
 
@@ -1285,10 +1289,16 @@ class BallStudio(QMainWindow):
 
     def _ble_pb_tick(self):
         if not self.ble_raw_data: return
-        self.ble_pb_index += 1
-        if self.ble_pb_index >= len(self.ble_raw_data):
-            self._ble_pb_pause()
+        elapsed = time.time() - self._ble_pb_start_time
+        start_t = self.ble_raw_data[self._ble_pb_start_index][0]
+        target_t = start_t + elapsed
+        # Find index closest to target_t
+        while (self.ble_pb_index < len(self.ble_raw_data) - 1
+               and self.ble_raw_data[self.ble_pb_index][0] < target_t):
+            self.ble_pb_index += 1
+        if self.ble_pb_index >= len(self.ble_raw_data) - 1:
             self.ble_pb_index = len(self.ble_raw_data) - 1
+            self._ble_pb_pause()
         self._ble_pb_update()
 
     def _ble_pb_update(self):
