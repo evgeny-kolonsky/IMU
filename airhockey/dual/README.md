@@ -1,22 +1,4 @@
-Two disks collisions.
+Two disks collisions. 
 
-Discussion with Claude:
-Да, 500 Гц — хороший выбор. Получите 10-25 точек на удар вместо одной.
-
-Нужно изменить в прошивке:
-
-1. **Частота датчика** — при инициализации LSM6DS3:
-```cpp
-imu.settings.accelSampleRate = 833;  // или 416
-imu.settings.gyroSampleRate = 833;
-```
-
-2. **Интервал записи** — с 20 мс на 2 мс:
-```cpp
-#define SAMPLE_INTERVAL_MS 2
-```
-
-3. **Размер буфера** — при 500 Гц за 10 секунд будет 5000 отсчётов вместо 500. Проверьте, что памяти хватает.
-
-Также в приложении нужно будет учесть, что скачивание займёт больше времени (в 10 раз больше данных).
+Condition $a_1 = -a_2$ not fullfilled. Suggested change in data resolution: 50 Hz -> 500 Hz.
 
